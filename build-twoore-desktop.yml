@@ -1,0 +1,124 @@
+name: Build TWOORE Desktop + Mining Center
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/build-twoore-desktop.yml'
+      - 'patches/TWOORE-Mining-Center.patch'
+
+jobs:
+  build-linux-desktop:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout builder repository
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential libtool autotools-dev automake pkg-config \
+            bsdextrautils python3 git ccache yasm \
+            libevent-dev libboost-all-dev libsqlite3-dev libzmq3-dev libsodium-dev \
+            qtbase5-dev qttools5-dev qttools5-dev-tools qtwayland5 libqrencode-dev
+
+      - name: Clone official TWOORE v0.1.14
+        run: |
+          git clone --depth 1 --branch v0.1.14 \
+            https://github.com/twoore/twoore-chain.git twoore-src
+
+      - name: Apply TWOORE Desktop Mining Center patch
+        working-directory: twoore-src
+        run: |
+          patch -p2 < ../patches/TWOORE-Mining-Center.patch
+          git diff --check
+
+      - name: Configure TWOORE Desktop
+        working-directory: twoore-src
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+        run: |
+          ./autogen.sh
+          ./configure \
+            --with-gui=qt5 \
+            --with-sqlite=yes \
+            --without-bdb \
+            --enable-zmq \
+            --disable-tests \
+            --disable-bench \
+            CC="ccache gcc" \
+            CXX="ccache g++" \
+            CXXFLAGS="-O2"
+
+      - name: Build TWOORE Desktop, daemon and CLI
+        working-directory: twoore-src
+        run: |
+          make -j2
+
+      - name: Build CKPool
+        run: |
+          git clone --depth 1 https://github.com/ckolivas/ckpool.git ckpool-src
+          cd ckpool-src
+          ./autogen.sh
+          ./configure
+          make -j2
+
+      - name: Prepare distribution
+        run: |
+          mkdir -p dist/bin dist/ckpool dist/docs
+
+          cp twoore-src/src/qt/bitcoin-qt dist/bin/twoore-desktop
+          cp twoore-src/src/twoored dist/bin/twoored
+          cp twoore-src/src/twoore-cli dist/bin/twoore-cli
+          cp ckpool-src/src/ckpool dist/ckpool/ckpool
+
+          cp twoore-src/TWOORE-DESKTOP-MINING-CENTER.md dist/docs/ 2>/dev/null || true
+
+          cat > dist/run-twoore-desktop.sh <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          ROOT="$(cd "$(dirname "$0")" && pwd)"
+          DATADIR="${TWOORE_DATADIR:-$HOME/twoore-mainnet}"
+          CONF="${TWOORE_CONF:-$DATADIR/twoore.conf}"
+
+          if pgrep -x twoored >/dev/null 2>&1; then
+            echo "A separate twoored process is already running. Stop it first."
+            exit 1
+          fi
+
+          exec "$ROOT/bin/twoore-desktop" \
+            -datadir="$DATADIR" \
+            -conf="$CONF" \
+            -txindex=0
+          EOF
+
+          chmod +x dist/run-twoore-desktop.sh dist/bin/* dist/ckpool/ckpool
+
+          sha256sum \
+            dist/bin/twoore-desktop \
+            dist/bin/twoored \
+            dist/bin/twoore-cli \
+            dist/ckpool/ckpool \
+            > dist/SHA256SUMS.txt
+
+          tar -C dist -czf TWOORE-Desktop-MiningCenter-linux-x86_64.tar.gz .
+
+      - name: Verify binaries
+        run: |
+          ./dist/bin/twoored -version | head -n 5
+          ./dist/bin/twoore-cli -version | head -n 5
+          ldd ./dist/bin/twoore-desktop || true
+          ./dist/ckpool/ckpool -h | head -n 20 || true
+          cat dist/SHA256SUMS.txt
+
+      - name: Upload complete artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TWOORE-Desktop-MiningCenter-linux-x86_64
+          path: |
+            TWOORE-Desktop-MiningCenter-linux-x86_64.tar.gz
+            dist/SHA256SUMS.txt
+          retention-days: 14
