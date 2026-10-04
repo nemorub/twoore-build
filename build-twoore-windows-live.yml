@@ -1,0 +1,332 @@
+name: Build TWOORE Windows Live
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/build-twoore-windows-live.yml'
+
+jobs:
+  build-windows-live:
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout builder repository
+        uses: actions/checkout@v4
+
+      - name: Set up MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            base-devel
+            mingw-w64-x86_64-toolchain
+            mingw-w64-x86_64-boost
+            mingw-w64-x86_64-libevent
+            mingw-w64-x86_64-openssl
+            mingw-w64-x86_64-sqlite3
+            mingw-w64-x86_64-zeromq
+            mingw-w64-x86_64-libsodium
+            mingw-w64-x86_64-autotools
+            mingw-w64-x86_64-libtool
+            mingw-w64-x86_64-pkg-config
+            git
+
+      - name: Clone TWOORE v0.1.14
+        shell: msys2 {0}
+        run: |
+          git clone --depth 1 --branch v0.1.14 https://github.com/twoore/twoore-chain.git twoore-src
+
+      - name: Patch live-chain difficulty from height 10003
+        shell: msys2 {0}
+        working-directory: twoore-src
+        run: |
+          sed -i '/unsigned int nProofOfWorkLimit = UintToArith256(params.powLimit).GetCompact();/a\
+          \
+              // TWOORE live-chain compatibility from height 10003.\
+              if (pindexLast->nHeight + 1 >= 10003) {\
+                  return nProofOfWorkLimit;\
+              }' src/pow.cpp
+
+          grep -n -A6 -B2 'live-chain compatibility' src/pow.cpp
+
+      - name: Configure TWOORE
+        shell: msys2 {0}
+        working-directory: twoore-src
+        run: |
+          ./autogen.sh
+          export LIBS="-lsodium"
+          ./configure \
+            --disable-gui \
+            --disable-tests \
+            --disable-bench \
+            --disable-wallet \
+            --without-bdb
+
+      - name: Build patched node and CLI
+        shell: msys2 {0}
+        working-directory: twoore-src
+        run: |
+          make -j2
+
+      - name: Create live CPU miner source
+        shell: msys2 {0}
+        run: |
+          cat > twoore-miner-live.cpp <<'CPP'
+          #include <windows.h>
+          #include <cstdio>
+          #include <cstdlib>
+          #include <iostream>
+          #include <sstream>
+          #include <string>
+
+          static std::string quote(const std::string& s)
+          {
+              return "\"" + s + "\"";
+          }
+
+          static std::string exe_dir()
+          {
+              char path[MAX_PATH] = {0};
+              DWORD n = GetModuleFileNameA(nullptr, path, MAX_PATH);
+              std::string p(path, n);
+              const auto pos = p.find_last_of("\\/");
+              return pos == std::string::npos ? "." : p.substr(0, pos);
+          }
+
+          static std::string capture(const std::string& cmd, int& rc)
+          {
+              std::string out;
+              FILE* pipe = _popen((cmd + " 2>&1").c_str(), "r");
+              if (!pipe) {
+                  rc = -1;
+                  return "Could not start twoore-cli.exe";
+              }
+              char buf[4096];
+              while (fgets(buf, sizeof(buf), pipe)) out += buf;
+              rc = _pclose(pipe);
+              return out;
+          }
+
+          static long long parse_height(const std::string& s)
+          {
+              std::stringstream ss(s);
+              long long h = -1;
+              ss >> h;
+              return h;
+          }
+
+          static void help()
+          {
+              std::cout <<
+              "TWOORE Live CPU Miner for Windows\n"
+              "\n"
+              "Usage:\n"
+              "  twoore-miner.exe [options]\n"
+              "\n"
+              "Options:\n"
+              "  --address ADDRESS     Payout address\n"
+              "  --datadir PATH        TWOORE data directory (default C:\\TWOORE\\data)\n"
+              "  --conf PATH           Config file (default C:\\TWOORE\\data\\twoore.conf)\n"
+              "  --rpcport PORT        RPC port (default 8332)\n"
+              "  --maxtries N          Hash attempts per RPC batch (default 10000000)\n"
+              "  --minheight N         Refuse to mine below this height (default 10722)\n"
+              "  --help                Show this help\n"
+              "\n"
+              "This miner uses the node's built-in generatetoaddress RPC.\n"
+              "It is a CPU miner. It is NOT a Stratum server for Bitaxe.\n";
+          }
+
+          int main(int argc, char** argv)
+          {
+              std::string address = "16vsr8XPH4GV2f9P7szCA2mJvHXsKJWCdH";
+              std::string datadir = "C:\\TWOORE\\data";
+              std::string conf = "C:\\TWOORE\\data\\twoore.conf";
+              std::string rpcport = "8332";
+              std::string maxtries = "10000000";
+              long long minheight = 10722;
+
+              for (int i = 1; i < argc; ++i) {
+                  std::string a = argv[i];
+                  auto need = [&](const char* name) -> std::string {
+                      if (i + 1 >= argc) {
+                          std::cerr << "Missing value for " << name << "\n";
+                          std::exit(2);
+                      }
+                      return argv[++i];
+                  };
+                  if (a == "--help" || a == "-h") { help(); return 0; }
+                  else if (a == "--address") address = need("--address");
+                  else if (a == "--datadir") datadir = need("--datadir");
+                  else if (a == "--conf") conf = need("--conf");
+                  else if (a == "--rpcport") rpcport = need("--rpcport");
+                  else if (a == "--maxtries") maxtries = need("--maxtries");
+                  else if (a == "--minheight") minheight = std::stoll(need("--minheight"));
+                  else {
+                      std::cerr << "Unknown option: " << a << "\n";
+                      help();
+                      return 2;
+                  }
+              }
+
+              const std::string cli = exe_dir() + "\\twoore-cli.exe";
+              const std::string base =
+                  quote(cli) +
+                  " -datadir=" + quote(datadir) +
+                  " -conf=" + quote(conf) +
+                  " -rpcport=" + rpcport;
+
+              std::cout << "TWOORE Live CPU Miner\n";
+              std::cout << "Payout:     " << address << "\n";
+              std::cout << "Data dir:   " << datadir << "\n";
+              std::cout << "RPC port:   " << rpcport << "\n";
+              std::cout << "Min height: " << minheight << "\n";
+              std::cout << "Press Ctrl+C to stop.\n\n";
+
+              for (;;) {
+                  int rc = 0;
+                  std::string hs = capture(base + " getblockcount", rc);
+                  long long h = parse_height(hs);
+
+                  if (rc != 0 || h < 0) {
+                      std::cerr << "Node/RPC unavailable: " << hs;
+                      Sleep(5000);
+                      continue;
+                  }
+
+                  if (h < minheight) {
+                      std::cout << "Waiting for sync. Height " << h
+                                << " / minimum " << minheight << "\r" << std::flush;
+                      Sleep(5000);
+                      continue;
+                  }
+
+                  std::cout << "\nMining on height " << h
+                            << " -> " << (h + 1) << " ...\n";
+
+                  const std::string cmd =
+                      base + " generatetoaddress 1 " + quote(address) + " " + maxtries;
+
+                  std::string result = capture(cmd, rc);
+                  if (rc != 0) {
+                      std::cerr << "Mining RPC error:\n" << result << "\n";
+                      Sleep(3000);
+                      continue;
+                  }
+
+                  std::cout << result;
+                  if (result.find("00000000") != std::string::npos) {
+                      std::cout << "*** BLOCK CANDIDATE FOUND/SUBMITTED ***\n";
+                  }
+              }
+          }
+          CPP
+
+      - name: Build live CPU miner
+        shell: msys2 {0}
+        run: |
+          g++ -O2 -std=c++17 -static -static-libgcc -static-libstdc++ \
+            twoore-miner-live.cpp -o twoore-miner.exe
+          ls -lh twoore-miner.exe
+
+      - name: Prepare Windows package
+        shell: msys2 {0}
+        run: |
+          mkdir -p dist
+
+          cp twoore-src/src/twoored.exe dist/
+          cp twoore-src/src/twoore-cli.exe dist/
+          cp twoore-miner.exe dist/
+
+          cat > dist/twoore.conf.example <<'CONF'
+          server=1
+          listen=1
+          port=8222
+
+          rpcuser=twoore
+          rpcpassword=twoorepass
+          rpcbind=127.0.0.1
+          rpcallowip=127.0.0.1
+          rpcport=8332
+
+          txindex=0
+
+          addnode=139.84.233.10:8222
+          addnode=108.61.128.66:8222
+          addnode=64.176.235.222:8222
+          addnode=192.248.165.108:8222
+          CONF
+
+          cat > dist/start-node.cmd <<'CMD'
+          @echo off
+          cd /d %~dp0
+          if not exist C:\TWOORE\data mkdir C:\TWOORE\data
+          twoored.exe -datadir=C:\TWOORE\data -conf=C:\TWOORE\data\twoore.conf -txindex=0 -printtoconsole
+          pause
+          CMD
+
+          cat > dist/start-miner.cmd <<'CMD'
+          @echo off
+          cd /d %~dp0
+          twoore-miner.exe
+          pause
+          CMD
+
+          cat > dist/status.cmd <<'CMD'
+          @echo off
+          cd /d %~dp0
+          twoore-cli.exe -datadir=C:\TWOORE\data -conf=C:\TWOORE\data\twoore.conf -rpcport=8332 getblockchaininfo
+          pause
+          CMD
+
+          cat > dist/README-WINDOWS.txt <<'TXT'
+          TWOORE Windows Live-Compatible
+
+          This package contains:
+          - twoored.exe      patched for the live chain from height 10003
+          - twoore-cli.exe   command-line RPC client
+          - twoore-miner.exe live CPU miner using generatetoaddress RPC
+
+          IMPORTANT:
+          twoore-miner.exe is a CPU miner. It is not a Stratum server and
+          cannot directly accept Bitaxe connections.
+
+          Recommended layout:
+            C:\TWOORE\src\  -> these files
+            C:\TWOORE\data\ -> data directory and twoore.conf
+
+          Copy twoore.conf.example to:
+            C:\TWOORE\data\twoore.conf
+
+          Start node:
+            start-node.cmd
+
+          Check sync:
+            status.cmd
+
+          Start CPU mining:
+            start-miner.cmd
+
+          Default payout:
+            16vsr8XPH4GV2f9P7szCA2mJvHXsKJWCdH
+
+          To override:
+            twoore-miner.exe --address YOUR_ADDRESS
+
+          The miner refuses to mine below height 10722 by default.
+          TXT
+
+          sha256sum dist/*.exe > dist/SHA256SUMS.txt
+          cat dist/SHA256SUMS.txt
+
+          powershell.exe -NoProfile -Command \
+            "Compress-Archive -Path 'dist\\*' -DestinationPath 'TWOORE-Windows-Live-Compatible.zip' -Force"
+
+      - name: Upload Windows package
+        uses: actions/upload-artifact@v4
+        with:
+          name: TWOORE-Windows-Live-Compatible
+          path: TWOORE-Windows-Live-Compatible.zip
+          retention-days: 14
