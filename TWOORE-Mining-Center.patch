@@ -1,0 +1,1503 @@
+diff -ruN twoore-pristine/twoore-chain-main/START-TWOORE-DESKTOP-WINDOWS.bat twoore-final/twoore-chain-main/START-TWOORE-DESKTOP-WINDOWS.bat
+--- twoore-pristine/twoore-chain-main/START-TWOORE-DESKTOP-WINDOWS.bat	1970-01-01 00:00:00.000000000 +0000
++++ twoore-final/twoore-chain-main/START-TWOORE-DESKTOP-WINDOWS.bat	2026-10-04 21:34:47.871096444 +0000
+@@ -0,0 +1,4 @@
++@echo off
++setlocal
++REM Change Ubuntu below only if your WSL distribution has a different name.
++wsl.exe -d Ubuntu bash -lc "cd ~/twoore-desktop/twoore-chain-main && ./dist/run-twoore-desktop.sh"
+diff -ruN twoore-pristine/twoore-chain-main/TWOORE-DESKTOP-MINING-CENTER.md twoore-final/twoore-chain-main/TWOORE-DESKTOP-MINING-CENTER.md
+--- twoore-pristine/twoore-chain-main/TWOORE-DESKTOP-MINING-CENTER.md	1970-01-01 00:00:00.000000000 +0000
++++ twoore-final/twoore-chain-main/TWOORE-DESKTOP-MINING-CENTER.md	2026-10-04 21:33:57.125882544 +0000
+@@ -0,0 +1,102 @@
++# TWOORE Desktop + Mining Center
++
++This source tree adds a native Qt **Mining Center** to the TWOORE desktop node.
++It is designed for the current setup where the node, CKPool and chain data live
++inside Ubuntu/WSL while the user works from Windows.
++
++## Why build the Linux GUI in Ubuntu/WSL
++
++Running the Qt GUI inside WSLg avoids a fragile RPC bridge between a Windows
++node and a Linux CKPool. The GUI is still shown on the Windows desktop, but the
++node and CKPool share `127.0.0.1`, the same filesystem and the same TWOORE
++configuration.
++
++## Added features
++
++The toolbar has a new **Mining Center** button (Alt+5). It provides:
++
++- local block height, header height, best block hash and IBD state;
++- trusted TWOORE peer consensus checks;
++- public API/hash verification;
++- a hard safety gate: CKPool cannot start when the public tip is not confirmed;
++- CKPool configuration repair and start/stop control;
++- automatic CKPool shutdown when a newly mined block appears;
++- Bitaxe 1 / Bitaxe 2 monitoring through AxeOS `/api/system/info`;
++- one-click Bitaxe configuration through AxeOS `PATCH /api/system`;
++- Bitaxe pause/resume controls;
++- safe rollback only when 3 trusted peers and the TWOORE API confirm the common
++  public point;
++- a fresh peer-handshake check 15 seconds after a mined block and a 30-second
++  propagation grace period before a still-unconfirmed local block is eligible
++  for automatic rollback;
++- WSL detection and a Windows port-3333 bridge button. It requests UAC and
++  configures Windows `netsh portproxy` so LAN Bitaxe devices can reach CKPool
++  running inside WSL.
++
++## Live-chain compatibility
++
++`src/pow.cpp` contains the same live-chain compatibility rule used for the
++current public TWOORE chain: from height 10003 the proof-of-work target is the
++network powLimit. This is required to follow the current live chain that was
++observed through height 10722.
++
++## Build on Ubuntu / WSL
++
++From the source folder:
++
++```bash
++chmod +x build-twoore-desktop-ubuntu.sh
++./build-twoore-desktop-ubuntu.sh --install-deps
++```
++
++The build output is placed in:
++
++```text
++dist/twoore-desktop
++dist/twoored
++dist/twoore-cli
++dist/run-twoore-desktop.sh
++```
++
++Start it with:
++
++```bash
++./dist/run-twoore-desktop.sh
++```
++
++The launcher deliberately adds `-txindex=0` because the existing txindex in the
++current datadir was inconsistent after the previous restart and is not required
++for Bitaxe mining.
++
++## Windows + WSLg
++
++If Ubuntu is running under WSLg, `twoore-desktop` appears as a normal graphical
++window on Windows. Keep CKPool at:
++
++```text
++~/ckpool-twoore/src/ckpool
++~/ckpool-twoore/ckpool-twoore.conf
++```
++
++Inside Mining Center:
++
++1. Wait until blocks == headers and the public tip is green.
++2. Set each Bitaxe IP.
++3. The `Stratum host visible to Bitaxe` field should normally auto-detect the
++   Windows LAN IP (for example 192.168.50.x).
++4. Press **Windows bridge :3333** once after each WSL IP change. Windows will
++   request administrator approval.
++5. Press **Link to TWOORE** for each Bitaxe.
++6. Press **START MINING** only when the safety status is green.
++
++When a new block is detected, CKPool is stopped and the Bitaxe devices are
++paused while propagation is checked. The application does not assume that the
++peer `startingheight` value updates after accepting a block; public API hash
++confirmation is used for post-mining verification.
++
++## Important
++
++The Mining Center can prevent long private forks and repair a known local
++branch safely. It cannot force a remote TWOORE node to accept a header that the
++remote node considers invalid. In that case it stops mining and protects the
++local node instead of silently extending a private chain.
+diff -ruN twoore-pristine/twoore-chain-main/build-twoore-desktop-ubuntu.sh twoore-final/twoore-chain-main/build-twoore-desktop-ubuntu.sh
+--- twoore-pristine/twoore-chain-main/build-twoore-desktop-ubuntu.sh	1970-01-01 00:00:00.000000000 +0000
++++ twoore-final/twoore-chain-main/build-twoore-desktop-ubuntu.sh	2026-10-04 21:33:57.125733054 +0000
+@@ -0,0 +1,91 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++ROOT="$(cd "$(dirname "$0")" && pwd)"
++cd "$ROOT"
++
++if [[ "$ROOT" == /mnt/* ]]; then
++  echo "WARNING: You are building from a Windows-mounted path ($ROOT)."
++  echo "For WSL, move the source under your Linux home directory first, e.g.:"
++  echo "  cp -a '$ROOT' ~/twoore-desktop-source"
++  echo "Then build from ~/twoore-desktop-source for better reliability and speed."
++  echo
++fi
++
++INSTALL_DEPS=0
++if [[ "${1:-}" == "--install-deps" ]]; then
++  INSTALL_DEPS=1
++fi
++
++if [[ $INSTALL_DEPS -eq 1 ]]; then
++  echo "[1/5] Installing Ubuntu build dependencies..."
++  sudo apt update
++  sudo apt install -y \
++    build-essential libtool autotools-dev automake pkg-config bsdextrautils \
++    python3 libevent-dev libboost-dev libsqlite3-dev libzmq3-dev \
++    qtbase5-dev qttools5-dev qttools5-dev-tools qtwayland5 libqrencode-dev
++else
++  echo "[1/5] Dependency installation skipped."
++  echo "      Re-run with --install-deps if configure reports missing packages."
++fi
++
++echo "[2/5] Regenerating Autotools files..."
++./autogen.sh
++
++echo "[3/5] Configuring TWOORE Desktop + Mining Center..."
++./configure \
++  --with-gui=qt5 \
++  --with-sqlite=yes \
++  --without-bdb \
++  --enable-zmq \
++  --disable-tests \
++  --disable-bench \
++  CXXFLAGS="${CXXFLAGS:--O2}"
++
++echo "[4/5] Building with $(nproc) jobs..."
++make -j"$(nproc)"
++
++echo "[5/5] Preparing dist/ ..."
++mkdir -p dist
++cp -f src/qt/bitcoin-qt dist/twoore-desktop
++cp -f src/twoored dist/twoored
++cp -f src/twoore-cli dist/twoore-cli
++chmod +x dist/twoore-desktop dist/twoored dist/twoore-cli
++
++cat > dist/run-twoore-desktop.sh <<'RUNEOF'
++#!/usr/bin/env bash
++set -euo pipefail
++ROOT="$(cd "$(dirname "$0")" && pwd)"
++DATADIR="${TWOORE_DATADIR:-$HOME/twoore-mainnet}"
++CONF="${TWOORE_CONF:-$DATADIR/twoore.conf}"
++
++if pgrep -x twoored >/dev/null 2>&1; then
++  echo "A separate twoored process is already running."
++  echo "Stop it first so the GUI can own the datadir safely."
++  exit 1
++fi
++
++exec "$ROOT/twoore-desktop" \
++  -datadir="$DATADIR" \
++  -conf="$CONF" \
++  -txindex=0
++RUNEOF
++chmod +x dist/run-twoore-desktop.sh
++
++cat <<MSG
++
++============================================================
++ TWOORE Desktop build completed
++============================================================
++GUI:       $ROOT/dist/twoore-desktop
++Launcher:  $ROOT/dist/run-twoore-desktop.sh
++Daemon:    $ROOT/dist/twoored
++CLI:       $ROOT/dist/twoore-cli
++
++Run:
++  ./dist/run-twoore-desktop.sh
++
++If you are inside Windows WSL with WSLg, the Linux GUI will appear as a
++normal desktop window on Windows while CKPool stays inside Ubuntu.
++============================================================
++MSG
+diff -ruN twoore-pristine/twoore-chain-main/install-twoore-desktop-shortcut.sh twoore-final/twoore-chain-main/install-twoore-desktop-shortcut.sh
+--- twoore-pristine/twoore-chain-main/install-twoore-desktop-shortcut.sh	1970-01-01 00:00:00.000000000 +0000
++++ twoore-final/twoore-chain-main/install-twoore-desktop-shortcut.sh	2026-10-04 21:32:08.844218646 +0000
+@@ -0,0 +1,25 @@
++#!/usr/bin/env bash
++set -euo pipefail
++ROOT="$(cd "$(dirname "$0")" && pwd)"
++APP="$ROOT/dist/run-twoore-desktop.sh"
++
++if [[ ! -x "$APP" ]]; then
++  echo "Build the application first with ./build-twoore-desktop-ubuntu.sh"
++  exit 1
++fi
++
++mkdir -p "$HOME/.local/share/applications"
++DESKTOP="$HOME/.local/share/applications/twoore-desktop.desktop"
++cat > "$DESKTOP" <<EOF2
++[Desktop Entry]
++Type=Application
++Name=TWOORE Desktop
++Comment=TWOORE wallet, node, CKPool and Bitaxe Mining Center
++Exec=$APP
++Terminal=false
++Categories=Network;Finance;
++StartupNotify=true
++EOF2
++chmod +x "$DESKTOP"
++echo "Installed: $DESKTOP"
++echo "Under WSLg it should also appear in the Windows Start menu under your Ubuntu apps."
+diff -ruN twoore-pristine/twoore-chain-main/src/Makefile.qt.include twoore-final/twoore-chain-main/src/Makefile.qt.include
+--- twoore-pristine/twoore-chain-main/src/Makefile.qt.include	2026-09-11 07:48:12.000000000 +0000
++++ twoore-final/twoore-chain-main/src/Makefile.qt.include	2026-10-04 21:33:24.040357902 +0000
+@@ -56,6 +56,7 @@
+   qt/moc_macdockiconhandler.cpp \
+   qt/moc_macnotificationhandler.cpp \
+   qt/moc_modaloverlay.cpp \
++  qt/moc_miningcenter.cpp \
+   qt/moc_notificator.cpp \
+   qt/moc_openuridialog.cpp \
+   qt/moc_optionsdialog.cpp \
+@@ -129,6 +130,7 @@
+   qt/macnotificationhandler.h \
+   qt/macos_appnap.h \
+   qt/modaloverlay.h \
++  qt/miningcenter.h \
+   qt/networkstyle.h \
+   qt/notificator.h \
+   qt/openuridialog.h \
+@@ -232,6 +234,7 @@
+   qt/initexecutor.cpp \
+   qt/intro.cpp \
+   qt/modaloverlay.cpp \
++  qt/miningcenter.cpp \
+   qt/networkstyle.cpp \
+   qt/notificator.cpp \
+   qt/optionsdialog.cpp \
+diff -ruN twoore-pristine/twoore-chain-main/src/pow.cpp twoore-final/twoore-chain-main/src/pow.cpp
+--- twoore-pristine/twoore-chain-main/src/pow.cpp	2026-09-11 07:48:12.000000000 +0000
++++ twoore-final/twoore-chain-main/src/pow.cpp	2026-10-04 21:32:08.840682447 +0000
+@@ -15,6 +15,14 @@
+     assert(pindexLast != nullptr);
+     unsigned int nProofOfWorkLimit = UintToArith256(params.powLimit).GetCompact();
+ 
++    // TWOORE live-chain compatibility. The public chain switches to the
++    // powLimit difficulty at height 10003 and keeps that target afterwards.
++    // Keep this rule identical across miners/nodes that participate in the
++    // current live chain.
++    if (pindexLast->nHeight + 1 >= 10003) {
++        return nProofOfWorkLimit;
++    }
++
+     // Only change once per difficulty adjustment interval
+     if ((pindexLast->nHeight+1) % params.DifficultyAdjustmentInterval() != 0)
+     {
+diff -ruN twoore-pristine/twoore-chain-main/src/qt/bitcoingui.cpp twoore-final/twoore-chain-main/src/qt/bitcoingui.cpp
+--- twoore-pristine/twoore-chain-main/src/qt/bitcoingui.cpp	2026-09-11 07:48:12.000000000 +0000
++++ twoore-final/twoore-chain-main/src/qt/bitcoingui.cpp	2026-10-04 21:32:08.838445223 +0000
+@@ -14,6 +14,7 @@
+ #include <qt/guiconstants.h>
+ #include <qt/guiutil.h>
+ #include <qt/modaloverlay.h>
++#include <qt/miningcenter.h>
+ #include <qt/networkstyle.h>
+ #include <qt/notificator.h>
+ #include <qt/openuridialog.h>
+@@ -107,6 +108,7 @@
+     updateWindowTitle();
+ 
+     rpcConsole = new RPCConsole(node, _platformStyle, nullptr);
++    miningCenter = new MiningCenter(node, this);
+     helpMessageDialog = new HelpMessageDialog(this, false);
+ #ifdef ENABLE_WALLET
+     if(enableWallet)
+@@ -279,6 +281,19 @@
+     historyAction->setShortcut(QKeySequence(QStringLiteral("Alt+4")));
+     tabGroup->addAction(historyAction);
+ 
++    miningCenterAction = new QAction(platformStyle->SingleColorIcon(":/icons/synced"), tr("&Mining Center"), this);
++    miningCenterAction->setStatusTip(tr("Open TWOORE node, CKPool and Bitaxe control center"));
++    miningCenterAction->setToolTip(miningCenterAction->statusTip());
++    miningCenterAction->setShortcut(QKeySequence(QStringLiteral("Alt+5")));
++    connect(miningCenterAction, &QAction::triggered, [this] {
++        showNormalIfMinimized();
++        if (miningCenter) {
++            miningCenter->show();
++            miningCenter->raise();
++            miningCenter->activateWindow();
++        }
++    });
++
+ #ifdef ENABLE_WALLET
+     // These showNormalIfMinimized are needed because Send Coins and Receive Coins
+     // can be triggered from the tray menu, and need to show the GUI to be useful.
+@@ -510,6 +525,8 @@
+     settings->addAction(optionsAction);
+ 
+     QMenu* window_menu = appMenuBar->addMenu(tr("&Window"));
++    window_menu->addAction(miningCenterAction);
++    window_menu->addSeparator();
+ 
+     QAction* minimize_action = window_menu->addAction(tr("&Minimize"));
+     minimize_action->setShortcut(QKeySequence(tr("Ctrl+M")));
+@@ -578,6 +595,8 @@
+         toolbar->addAction(sendCoinsAction);
+         toolbar->addAction(receiveCoinsAction);
+         toolbar->addAction(historyAction);
++        toolbar->addSeparator();
++        toolbar->addAction(miningCenterAction);
+         overviewAction->setChecked(true);
+ 
+ #ifdef ENABLE_WALLET
+@@ -605,6 +624,7 @@
+ void BitcoinGUI::setClientModel(ClientModel *_clientModel, interfaces::BlockAndHeaderTipInfo* tip_info)
+ {
+     this->clientModel = _clientModel;
++    if (miningCenter) miningCenter->setClientModel(_clientModel);
+     if(_clientModel)
+     {
+         // Create system tray menu (or setup the dock menu) that late to prevent users from calling actions,
+diff -ruN twoore-pristine/twoore-chain-main/src/qt/bitcoingui.h twoore-final/twoore-chain-main/src/qt/bitcoingui.h
+--- twoore-pristine/twoore-chain-main/src/qt/bitcoingui.h	2026-09-11 07:48:12.000000000 +0000
++++ twoore-final/twoore-chain-main/src/qt/bitcoingui.h	2026-10-04 21:32:08.837355305 +0000
+@@ -41,6 +41,7 @@
+ class WalletModel;
+ class HelpMessageDialog;
+ class ModalOverlay;
++class MiningCenter;
+ enum class SynchronizationState;
+ 
+ namespace interfaces {
+@@ -136,6 +137,7 @@
+     QToolBar* appToolBar = nullptr;
+     QAction* overviewAction = nullptr;
+     QAction* historyAction = nullptr;
++    QAction* miningCenterAction = nullptr;
+     QAction* quitAction = nullptr;
+     QAction* sendCoinsAction = nullptr;
+     QAction* usedSendingAddressesAction = nullptr;
+@@ -175,6 +177,7 @@
+     RPCConsole* rpcConsole = nullptr;
+     HelpMessageDialog* helpMessageDialog = nullptr;
+     ModalOverlay* modalOverlay = nullptr;
++    MiningCenter* miningCenter = nullptr;
+ 
+     QMenu* m_network_context_menu = new QMenu(this);
+ 
+diff -ruN twoore-pristine/twoore-chain-main/src/qt/miningcenter.cpp twoore-final/twoore-chain-main/src/qt/miningcenter.cpp
+--- twoore-pristine/twoore-chain-main/src/qt/miningcenter.cpp	1970-01-01 00:00:00.000000000 +0000
++++ twoore-final/twoore-chain-main/src/qt/miningcenter.cpp	2026-10-04 21:32:44.782802466 +0000
+@@ -0,0 +1,979 @@
++// Copyright (c) 2026 TWOORE contributors
++// Distributed under the MIT software license.
++
++#include <qt/miningcenter.h>
++
++#include <qt/clientmodel.h>
++
++#include <interfaces/node.h>
++
++#include <QCheckBox>
++#include <QDateTime>
++#include <QDir>
++#include <QEventLoop>
++#include <QFile>
++#include <QFormLayout>
++#include <QFont>
++#include <QGroupBox>
++#include <QHBoxLayout>
++#include <QHostAddress>
++#include <QAbstractSocket>
++#include <QJsonArray>
++#include <QJsonDocument>
++#include <QJsonObject>
++#include <QJsonValue>
++#include <QLabel>
++#include <QLineEdit>
++#include <QMessageBox>
++#include <QNetworkAccessManager>
++#include <QNetworkInterface>
++#include <QNetworkReply>
++#include <QNetworkRequest>
++#include <QProcess>
++#include <QPushButton>
++#include <QSaveFile>
++#include <QSettings>
++#include <QTcpSocket>
++#include <QTextEdit>
++#include <QTimer>
++#include <QUrl>
++#include <QVBoxLayout>
++
++#include <algorithm>
++#include <map>
++#include <stdexcept>
++
++namespace {
++constexpr int REFRESH_MS = 3000;
++constexpr int API_TIMEOUT_MS = 5000;
++const QString GOOD = QStringLiteral("#35c46a");
++const QString WARN = QStringLiteral("#e6ad2f");
++const QString BAD = QStringLiteral("#e05252");
++const QString MUTED = QStringLiteral("#8899a6");
++
++QString homePath(const QString& relative)
++{
++    return QDir::home().filePath(relative);
++}
++
++QString normalizedIp(const QString& addr)
++{
++    QString out = addr;
++    if (out.startsWith('[')) {
++        const int close = out.indexOf(']');
++        if (close > 0) return out.mid(1, close - 1);
++    }
++    const int colon = out.lastIndexOf(':');
++    if (colon > 0) out = out.left(colon);
++    return out;
++}
++}
++
++MiningCenter::MiningCenter(interfaces::Node& node, QWidget* parent)
++    : QDialog(parent), m_node(node)
++{
++    setWindowTitle(tr("TWOORE Mining Center"));
++    resize(940, 760);
++    setModal(false);
++
++    m_network = new QNetworkAccessManager(this);
++    m_refresh_timer = new QTimer(this);
++    m_refresh_timer->setInterval(REFRESH_MS);
++    connect(m_refresh_timer, &QTimer::timeout, this, &MiningCenter::refreshAll);
++
++    auto* root = new QVBoxLayout(this);
++
++    auto* title = new QLabel(tr("TWOORE CONTROL CENTER — NODE · CKPOOL · BITAXE"), this);
++    QFont title_font = title->font();
++    title_font.setPointSize(title_font.pointSize() + 4);
++    title_font.setBold(true);
++    title->setFont(title_font);
++    root->addWidget(title);
++
++    auto* network_box = new QGroupBox(tr("Network safety"), this);
++    auto* network_form = new QFormLayout(network_box);
++    m_node_state = new QLabel(network_box);
++    m_blocks = new QLabel(network_box);
++    m_headers = new QLabel(network_box);
++    m_best_hash = new QLabel(network_box);
++    m_best_hash->setTextInteractionFlags(Qt::TextSelectableByMouse);
++    m_ibd = new QLabel(network_box);
++    m_connections = new QLabel(network_box);
++    m_peer_consensus = new QLabel(network_box);
++    m_api_state = new QLabel(network_box);
++    m_safety_state = new QLabel(network_box);
++    network_form->addRow(tr("Node:"), m_node_state);
++    network_form->addRow(tr("Blocks:"), m_blocks);
++    network_form->addRow(tr("Headers:"), m_headers);
++    network_form->addRow(tr("Best block:"), m_best_hash);
++    network_form->addRow(tr("IBD:"), m_ibd);
++    network_form->addRow(tr("Connections:"), m_connections);
++    network_form->addRow(tr("Trusted peers:"), m_peer_consensus);
++    network_form->addRow(tr("Public API:"), m_api_state);
++    network_form->addRow(tr("Safe to mine:"), m_safety_state);
++
++    auto* network_buttons = new QHBoxLayout();
++    auto* refresh_button = new QPushButton(tr("Refresh"), network_box);
++    auto* reconnect_button = new QPushButton(tr("Reconnect trusted peers"), network_box);
++    auto* repair_button = new QPushButton(tr("Repair / resync safely"), network_box);
++    network_buttons->addWidget(refresh_button);
++    network_buttons->addWidget(reconnect_button);
++    network_buttons->addWidget(repair_button);
++    network_form->addRow(network_buttons);
++
++    connect(refresh_button, &QPushButton::clicked, this, &MiningCenter::refreshAll);
++    connect(reconnect_button, &QPushButton::clicked, this, &MiningCenter::reconnectTrustedPeers);
++    connect(repair_button, &QPushButton::clicked, this, &MiningCenter::repairNetwork);
++
++    m_auto_heal = new QCheckBox(tr("Auto-heal: stop mining and safely roll back when 3 trusted peers + API confirm a divergence"), network_box);
++    m_auto_heal->setChecked(true);
++    m_auto_resume_pool = new QCheckBox(tr("Auto-resume CKPool after the new public tip is confirmed"), network_box);
++    m_auto_resume_pool->setChecked(false);
++    network_form->addRow(m_auto_heal);
++    network_form->addRow(m_auto_resume_pool);
++    root->addWidget(network_box);
++
++    auto* pool_box = new QGroupBox(tr("CKPool / Stratum"), this);
++    auto* pool_form = new QFormLayout(pool_box);
++    m_ckpool_path = new QLineEdit(homePath(QStringLiteral("ckpool-twoore/src/ckpool")), pool_box);
++    m_ckpool_conf = new QLineEdit(homePath(QStringLiteral("ckpool-twoore/ckpool-twoore.conf")), pool_box);
++    m_stratum_host = new QLineEdit(defaultStratumHost(), pool_box);
++    m_pool_state = new QLabel(pool_box);
++    m_stratum_state = new QLabel(pool_box);
++    pool_form->addRow(tr("CKPool binary:"), m_ckpool_path);
++    pool_form->addRow(tr("CKPool config:"), m_ckpool_conf);
++    pool_form->addRow(tr("Stratum host visible to Bitaxe:"), m_stratum_host);
++    pool_form->addRow(tr("CKPool:"), m_pool_state);
++    pool_form->addRow(tr("Port 3333:"), m_stratum_state);
++
++    auto* pool_buttons = new QHBoxLayout();
++    m_start_pool_button = new QPushButton(tr("START MINING"), pool_box);
++    auto* stop_pool_button = new QPushButton(tr("STOP CKPOOL"), pool_box);
++    auto* bridge_button = new QPushButton(tr("Windows bridge :3333"), pool_box);
++    pool_buttons->addWidget(m_start_pool_button);
++    pool_buttons->addWidget(stop_pool_button);
++    if (runningInWSL()) pool_buttons->addWidget(bridge_button);
++    else bridge_button->hide();
++    pool_form->addRow(pool_buttons);
++    connect(m_start_pool_button, &QPushButton::clicked, this, &MiningCenter::startPool);
++    connect(stop_pool_button, &QPushButton::clicked, this, &MiningCenter::stopPool);
++    connect(bridge_button, &QPushButton::clicked, this, &MiningCenter::configureWindowsBridge);
++    root->addWidget(pool_box);
++
++    auto* bitaxe_box = new QGroupBox(tr("Bitaxe"), this);
++    auto* bitaxe_layout = new QVBoxLayout(bitaxe_box);
++
++    auto create_bitaxe_row = [this, bitaxe_layout](const QString& label_text, QLineEdit*& ip, QLabel*& state, auto refresh_slot, auto config_slot) {
++        auto* row = new QHBoxLayout();
++        auto* name = new QLabel(label_text, this);
++        name->setMinimumWidth(75);
++        ip = new QLineEdit(this);
++        ip->setPlaceholderText(tr("192.168.50.x"));
++        state = new QLabel(tr("Not checked"), this);
++        state->setMinimumWidth(330);
++        auto* refresh = new QPushButton(tr("Read"), this);
++        auto* configure = new QPushButton(tr("Link to TWOORE"), this);
++        row->addWidget(name);
++        row->addWidget(ip);
++        row->addWidget(state, 1);
++        row->addWidget(refresh);
++        row->addWidget(configure);
++        bitaxe_layout->addLayout(row);
++        connect(refresh, &QPushButton::clicked, this, refresh_slot);
++        connect(configure, &QPushButton::clicked, this, config_slot);
++    };
++
++    create_bitaxe_row(tr("Bitaxe 1"), m_bitaxe1_ip, m_bitaxe1_state, &MiningCenter::refreshBitaxe1, &MiningCenter::configureBitaxe1);
++    create_bitaxe_row(tr("Bitaxe 2"), m_bitaxe2_ip, m_bitaxe2_state, &MiningCenter::refreshBitaxe2, &MiningCenter::configureBitaxe2);
++
++    QSettings saved;
++    m_bitaxe1_ip->setText(saved.value(QStringLiteral("MiningCenter/bitaxe1")).toString());
++    m_bitaxe2_ip->setText(saved.value(QStringLiteral("MiningCenter/bitaxe2")).toString());
++    const QString saved_host = saved.value(QStringLiteral("MiningCenter/stratumHost")).toString();
++    if (!saved_host.isEmpty()) m_stratum_host->setText(saved_host);
++
++    auto* miner_buttons = new QHBoxLayout();
++    auto* pause_button = new QPushButton(tr("Pause both Bitaxe"), bitaxe_box);
++    auto* resume_button = new QPushButton(tr("Resume both Bitaxe"), bitaxe_box);
++    miner_buttons->addWidget(pause_button);
++    miner_buttons->addWidget(resume_button);
++    bitaxe_layout->addLayout(miner_buttons);
++    connect(pause_button, &QPushButton::clicked, this, &MiningCenter::pauseBitaxes);
++    connect(resume_button, &QPushButton::clicked, this, &MiningCenter::resumeBitaxes);
++    root->addWidget(bitaxe_box);
++
++    m_log = new QTextEdit(this);
++    m_log->setReadOnly(true);
++    m_log->setMinimumHeight(120);
++    root->addWidget(m_log, 1);
++
++    appendLog(tr("Mining Center ready. CKPool is gated by public-network checks."));
++    m_refresh_timer->start();
++    QTimer::singleShot(250, this, &MiningCenter::refreshAll);
++}
++
++MiningCenter::~MiningCenter()
++{
++    QSettings saved;
++    if (m_bitaxe1_ip) saved.setValue(QStringLiteral("MiningCenter/bitaxe1"), m_bitaxe1_ip->text().trimmed());
++    if (m_bitaxe2_ip) saved.setValue(QStringLiteral("MiningCenter/bitaxe2"), m_bitaxe2_ip->text().trimmed());
++    if (m_stratum_host) saved.setValue(QStringLiteral("MiningCenter/stratumHost"), m_stratum_host->text().trimmed());
++}
++
++void MiningCenter::setClientModel(ClientModel* model)
++{
++    if (m_client_model == model) return;
++    if (m_client_model) disconnect(m_client_model, nullptr, this, nullptr);
++    m_client_model = model;
++    if (m_client_model) {
++        connect(m_client_model, &ClientModel::numBlocksChanged, this,
++            [this](int count, const QDateTime&, double, SyncType synctype, SynchronizationState) {
++                if (synctype == SyncType::BLOCK_SYNC) onBlockTipChanged(count);
++            });
++    }
++    refreshAll();
++}
++
++UniValue MiningCenter::rpc(const std::string& command, const UniValue& params, bool* ok, QString* error)
++{
++    try {
++        UniValue result = m_node.executeRpc(command, params, "/");
++        if (ok) *ok = true;
++        if (error) error->clear();
++        return result;
++    } catch (const UniValue& e) {
++        if (ok) *ok = false;
++        if (error) {
++            const UniValue& message = e.find_value("message");
++            *error = message.isStr() ? QString::fromStdString(message.get_str()) : QString::fromStdString(e.write());
++        }
++    } catch (const std::exception& e) {
++        if (ok) *ok = false;
++        if (error) *error = QString::fromUtf8(e.what());
++    } catch (...) {
++        if (ok) *ok = false;
++        if (error) *error = tr("Unknown RPC error");
++    }
++    return UniValue();
++}
++
++void MiningCenter::refreshAll()
++{
++    updateNodeAndPeers();
++    updateSafety();
++    updateApiAsync();
++
++    const bool running = isPoolRunning();
++    setStateLabel(m_pool_state, running ? tr("RUNNING") : tr("STOPPED"), running ? GOOD : MUTED);
++    const bool port_open = stratumPortOpen();
++    setStateLabel(m_stratum_state, port_open ? tr("OPEN") : tr("CLOSED"), port_open ? GOOD : MUTED);
++    m_start_pool_button->setEnabled(m_safe && !running);
++
++    // Automatic protection: a private/local extension immediately stops mining.
++    if (running && m_peer_height >= 0 && m_local_blocks > m_peer_height && m_peer_agree >= 2) {
++        appendLog(tr("Local tip moved ahead of trusted peers. CKPool stopped for propagation verification."));
++        stopPool();
++        m_pool_was_auto_stopped = true;
++    }
++
++    const qint64 now_ms = QDateTime::currentMSecsSinceEpoch();
++    if (m_pending_mined_height >= 0 && m_pending_since_ms > 0
++        && !m_pending_peers_refreshed && (now_ms - m_pending_since_ms) > 15000) {
++        m_pending_peers_refreshed = true;
++        appendLog(tr("Refreshing trusted peers to obtain a new post-mining startingheight handshake."));
++        reconnectTrustedPeers();
++        return;
++    }
++
++    bool allow_auto_rollback = false;
++    if (m_pending_mined_height >= 0) {
++        // Give the explorer/API time to index a freshly mined block. If the
++        // trusted nodes fall back to the previous public tip and the API still
++        // does not know our block after one minute, the strict rollback checks
++        // below may run.
++        allow_auto_rollback = m_pending_since_ms > 0 && m_pending_peers_refreshed
++            && (now_ms - m_pending_since_ms) > 30000 && m_api_code == 404;
++    } else {
++        // Startup/recovery case: a pre-existing local branch can be repaired
++        // without the post-mining grace period.
++        allow_auto_rollback = true;
++    }
++
++    if (m_auto_heal->isChecked() && allow_auto_rollback && !running
++        && m_local_blocks > m_peer_height && m_peer_height >= 0 && m_peer_agree >= 3
++        && now_ms - m_last_auto_heal_attempt > 30000) {
++        m_last_auto_heal_attempt = now_ms;
++        QString error;
++        if (safeRollbackToPublic(&error)) {
++            appendLog(tr("Auto-heal returned the node to the public common tip."));
++            m_pending_mined_height = -1;
++            m_pending_since_ms = 0;
++            m_pending_peers_refreshed = false;
++            refreshAll();
++            return;
++        }
++        if (!error.isEmpty()) appendLog(tr("Auto-heal held: %1").arg(error));
++    }
++
++    if (m_auto_resume_pool->isChecked() && m_pool_was_auto_stopped && m_safe && !isPoolRunning()) {
++        m_pool_was_auto_stopped = false;
++        appendLog(tr("Public tip confirmed again; auto-resuming CKPool."));
++        startPool();
++    }
++}
++
++void MiningCenter::updateNodeAndPeers()
++{
++    bool ok = false;
++    QString error;
++    UniValue empty(UniValue::VARR);
++    const UniValue info = rpc("getblockchaininfo", empty, &ok, &error);
++    if (!ok || !info.isObject()) {
++        setStateLabel(m_node_state, tr("RPC ERROR"), BAD);
++        appendLog(tr("getblockchaininfo failed: %1").arg(error));
++        return;
++    }
++
++    m_local_blocks = info.find_value("blocks").getInt<int>();
++    m_local_headers = info.find_value("headers").getInt<int>();
++    m_local_hash = QString::fromStdString(info.find_value("bestblockhash").get_str());
++    m_ibd_state = info.find_value("initialblockdownload").get_bool();
++
++    setStateLabel(m_node_state, tr("ONLINE"), GOOD);
++    m_blocks->setText(QString::number(m_local_blocks));
++    m_headers->setText(QString::number(m_local_headers));
++    m_best_hash->setText(m_local_hash);
++    setStateLabel(m_ibd, m_ibd_state ? tr("YES") : tr("NO"), m_ibd_state ? WARN : GOOD);
++    m_connections->setText(QString::number(static_cast<qulonglong>(m_node.getNodeCount(ConnectionDirection::Both))));
++
++    const UniValue peers = rpc("getpeerinfo", empty, &ok, &error);
++    std::map<int, int> heights;
++    m_trusted_connected = 0;
++    if (ok && peers.isArray()) {
++        for (const UniValue& p : peers.getValues()) {
++            if (!p.isObject()) continue;
++            const UniValue& addr_v = p.find_value("addr");
++            const UniValue& subver_v = p.find_value("subver");
++            const UniValue& height_v = p.find_value("startingheight");
++            if (!addr_v.isStr() || !height_v.isNum()) continue;
++            const QString addr = QString::fromStdString(addr_v.get_str());
++            const QString ip = normalizedIp(addr);
++            bool trusted = false;
++            for (const QString& candidate : m_trusted_peers) {
++                if (normalizedIp(candidate) == ip) {
++                    trusted = true;
++                    break;
++                }
++            }
++            if (!trusted) continue;
++            if (subver_v.isStr() && !QString::fromStdString(subver_v.get_str()).contains(QStringLiteral("Twoore"), Qt::CaseInsensitive)) continue;
++            const int h = height_v.getInt<int>();
++            if (h >= 0) {
++                ++m_trusted_connected;
++                ++heights[h];
++            }
++        }
++    }
++
++    m_peer_height = -1;
++    m_peer_agree = 0;
++    for (const auto& [height, count] : heights) {
++        if (count > m_peer_agree) {
++            m_peer_height = height;
++            m_peer_agree = count;
++        }
++    }
++
++    if (m_peer_height >= 0) {
++        m_peer_consensus->setText(tr("%1/%2 agree at height %3")
++            .arg(m_peer_agree).arg(m_trusted_connected).arg(m_peer_height));
++    } else {
++        m_peer_consensus->setText(tr("No trusted consensus"));
++    }
++}
++
++void MiningCenter::updateSafety()
++{
++    const bool chain_synced = m_local_blocks >= 0 && m_local_blocks == m_local_headers && !m_ibd_state;
++    const bool api_match = m_api_code == 200 && (m_api_hash.isEmpty() || m_api_hash == m_local_hash);
++    const bool peers_match_handshake_tip = m_peer_height == m_local_blocks && m_peer_agree >= 3;
++
++    // startingheight in getpeerinfo is a handshake value and does not advance after
++    // a peer accepts our new block. Therefore API confirmation is authoritative
++    // after mining; peer startingheight is used mainly to establish the common tip
++    // before mining and during recovery.
++    const bool public_confirmed = api_match || peers_match_handshake_tip;
++    const bool peer_presence = m_trusted_connected >= 1;
++    m_safe = chain_synced && public_confirmed && peer_presence;
++
++    if (m_safe) {
++        setStateLabel(m_safety_state, tr("YES — PUBLIC TIP CONFIRMED"), GOOD);
++        m_last_safe_height = m_local_blocks;
++        if (m_pending_mined_height == m_local_blocks && api_match) {
++            appendLog(tr("Mined block %1 is now confirmed by the public API.").arg(m_local_blocks));
++            m_pending_mined_height = -1;
++            m_pending_since_ms = 0;
++            m_pending_peers_refreshed = false;
++        }
++    } else if (m_pending_mined_height >= 0) {
++        setStateLabel(m_safety_state, tr("WAIT — VERIFYING NEW BLOCK PROPAGATION"), WARN);
++    } else if (m_local_blocks > m_peer_height && m_peer_height >= 0) {
++        setStateLabel(m_safety_state, tr("NO — LOCAL CHAIN AHEAD"), BAD);
++    } else if (!chain_synced) {
++        setStateLabel(m_safety_state, tr("NO — SYNCHRONIZING"), WARN);
++    } else {
++        setStateLabel(m_safety_state, tr("NO — WAITING FOR PUBLIC CONFIRMATION"), WARN);
++    }
++}
++
++void MiningCenter::updateApiAsync()
++{
++    if (m_refreshing_api || m_local_blocks < 0) return;
++    m_refreshing_api = true;
++    const int requested_height = m_local_blocks;
++    const QString requested_hash = m_local_hash;
++    QNetworkRequest req(QUrl(QStringLiteral("https://api.twoore.org/api/block/%1").arg(requested_height)));
++    req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("TWOORE-MiningCenter/1.0"));
++    QNetworkReply* reply = m_network->get(req);
++    QTimer::singleShot(API_TIMEOUT_MS, reply, [reply] {
++        if (!reply->isFinished()) reply->abort();
++    });
++    connect(reply, &QNetworkReply::finished, this, [this, reply, requested_height, requested_hash] {
++        m_refreshing_api = false;
++        const QVariant status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute);
++        m_api_code = status.isValid() ? status.toInt() : 0;
++        m_api_hash.clear();
++        if (m_api_code == 200) {
++            const QJsonDocument doc = QJsonDocument::fromJson(reply->readAll());
++            if (!doc.isNull()) m_api_hash = extractHash(doc.isObject() ? QJsonValue(doc.object()) : QJsonValue(doc.array()));
++            if (requested_height == m_local_blocks) {
++                if (!m_api_hash.isEmpty() && m_api_hash == requested_hash) {
++                    setStateLabel(m_api_state, tr("HTTP 200 — HASH MATCH"), GOOD);
++                } else if (m_api_hash.isEmpty()) {
++                    setStateLabel(m_api_state, tr("HTTP 200"), GOOD);
++                } else {
++                    setStateLabel(m_api_state, tr("HTTP 200 — HASH MISMATCH"), BAD);
++                }
++            }
++        } else if (m_api_code == 404) {
++            setStateLabel(m_api_state, tr("HTTP 404 — height not public"), WARN);
++        } else {
++            setStateLabel(m_api_state, tr("Unavailable (%1)").arg(m_api_code), WARN);
++        }
++        reply->deleteLater();
++        updateSafety();
++    });
++}
++
++bool MiningCenter::fetchApiBlockSync(int height, int& status_code, QString& hash)
++{
++    hash.clear();
++    QNetworkRequest req(QUrl(QStringLiteral("https://api.twoore.org/api/block/%1").arg(height)));
++    req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("TWOORE-MiningCenter/1.0"));
++    QNetworkReply* reply = m_network->get(req);
++    QEventLoop loop;
++    QTimer timeout;
++    timeout.setSingleShot(true);
++    connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
++    connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
++    timeout.start(API_TIMEOUT_MS);
++    loop.exec();
++    if (!reply->isFinished()) reply->abort();
++    const QVariant status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute);
++    status_code = status.isValid() ? status.toInt() : 0;
++    if (status_code == 200) {
++        const QJsonDocument doc = QJsonDocument::fromJson(reply->readAll());
++        if (!doc.isNull()) hash = extractHash(doc.isObject() ? QJsonValue(doc.object()) : QJsonValue(doc.array()));
++    }
++    reply->deleteLater();
++    return status_code != 0;
++}
++
++QString MiningCenter::extractHash(const QJsonValue& value) const
++{
++    if (value.isObject()) {
++        const QJsonObject obj = value.toObject();
++        for (const QString& key : {QStringLiteral("hash"), QStringLiteral("blockhash")}) {
++            const QJsonValue v = obj.value(key);
++            if (v.isString() && v.toString().size() >= 32) return v.toString();
++        }
++        for (auto it = obj.constBegin(); it != obj.constEnd(); ++it) {
++            const QString found = extractHash(it.value());
++            if (!found.isEmpty()) return found;
++        }
++    } else if (value.isArray()) {
++        for (const QJsonValue& v : value.toArray()) {
++            const QString found = extractHash(v);
++            if (!found.isEmpty()) return found;
++        }
++    }
++    return {};
++}
++
++void MiningCenter::reconnectTrustedPeers()
++{
++    bool ok = false;
++    QString error;
++    // Force a fresh VERSION handshake. This matters because getpeerinfo's
++    // startingheight value is only set at connection time.
++    for (const QString& peer : m_trusted_peers) {
++        UniValue params(UniValue::VARR);
++        params.push_back(peer.toStdString());
++        rpc("disconnectnode", params, &ok, &error);
++    }
++
++    QTimer::singleShot(500, this, [this] {
++        bool add_ok = false;
++        QString add_error;
++        for (const QString& peer : m_trusted_peers) {
++            UniValue params(UniValue::VARR);
++            params.push_back(peer.toStdString());
++            params.push_back("onetry");
++            rpc("addnode", params, &add_ok, &add_error);
++        }
++        appendLog(tr("Trusted peers reconnected for a fresh height handshake."));
++        QTimer::singleShot(1500, this, &MiningCenter::refreshAll);
++    });
++}
++
++bool MiningCenter::isPoolRunning() const
++{
++    QProcess p;
++    p.start(QStringLiteral("pgrep"), {QStringLiteral("-x"), QStringLiteral("ckpool")});
++    if (!p.waitForFinished(1000)) return false;
++    return p.exitStatus() == QProcess::NormalExit && p.exitCode() == 0;
++}
++
++bool MiningCenter::stratumPortOpen() const
++{
++    QTcpSocket socket;
++    socket.connectToHost(QHostAddress::LocalHost, 3333);
++    const bool connected = socket.waitForConnected(250);
++    if (connected) socket.disconnectFromHost();
++    return connected;
++}
++
++QString MiningCenter::readConfigValue(const QString& key) const
++{
++    const QString path = homePath(QStringLiteral("twoore-mainnet/twoore.conf"));
++    QFile file(path);
++    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) return {};
++    QString last;
++    while (!file.atEnd()) {
++        const QString line = QString::fromUtf8(file.readLine()).trimmed();
++        if (line.startsWith('#') || !line.contains('=')) continue;
++        const int pos = line.indexOf('=');
++        if (line.left(pos).trimmed() == key) last = line.mid(pos + 1).trimmed();
++    }
++    return last;
++}
++
++bool MiningCenter::repairCKPoolConfig(QString* error)
++{
++    QFile input(m_ckpool_conf->text());
++    if (!input.open(QIODevice::ReadOnly)) {
++        if (error) *error = tr("Cannot open CKPool config: %1").arg(m_ckpool_conf->text());
++        return false;
++    }
++    QJsonParseError parse_error;
++    QJsonDocument doc = QJsonDocument::fromJson(input.readAll(), &parse_error);
++    input.close();
++    if (parse_error.error != QJsonParseError::NoError || !doc.isObject()) {
++        if (error) *error = tr("CKPool config is not valid JSON: %1").arg(parse_error.errorString());
++        return false;
++    }
++
++    const QString rpc_user = readConfigValue(QStringLiteral("rpcuser"));
++    const QString rpc_pass = readConfigValue(QStringLiteral("rpcpassword"));
++    if (rpc_user.isEmpty() || rpc_pass.isEmpty()) {
++        if (error) *error = tr("rpcuser/rpcpassword were not found in ~/twoore-mainnet/twoore.conf");
++        return false;
++    }
++
++    QJsonObject root = doc.object();
++    QJsonObject daemon;
++    daemon.insert(QStringLiteral("url"), QStringLiteral("127.0.0.1:8332"));
++    daemon.insert(QStringLiteral("auth"), rpc_user);
++    daemon.insert(QStringLiteral("pass"), rpc_pass);
++    daemon.insert(QStringLiteral("notify"), true);
++    root.insert(QStringLiteral("btcd"), QJsonArray{daemon});
++    root.insert(QStringLiteral("btcsig"), QStringLiteral("/TWOORE-BITAXE/"));
++    root.insert(QStringLiteral("blockpoll"), 100);
++    root.insert(QStringLiteral("donation"), 0.0);
++    root.insert(QStringLiteral("nonce1length"), 4);
++    root.insert(QStringLiteral("nonce2length"), 8);
++    root.insert(QStringLiteral("update_interval"), 5);
++    root.insert(QStringLiteral("version_mask"), QStringLiteral("1fffe000"));
++    root.insert(QStringLiteral("dropidle"), 0);
++    root.insert(QStringLiteral("serverurl"), QJsonArray{QStringLiteral("0.0.0.0:3333")});
++    root.insert(QStringLiteral("mindiff"), 1);
++    root.insert(QStringLiteral("startdiff"), 1);
++    root.insert(QStringLiteral("maxdiff"), 1);
++    root.insert(QStringLiteral("zmqblock"), QStringLiteral("tcp://127.0.0.1:28332"));
++    root.insert(QStringLiteral("logdir"), homePath(QStringLiteral("ckpool-twoore/logs")));
++
++    const QString backup = m_ckpool_conf->text() + QStringLiteral(".bak-") + QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss"));
++    QFile::copy(m_ckpool_conf->text(), backup);
++    QSaveFile output(m_ckpool_conf->text());
++    if (!output.open(QIODevice::WriteOnly)) {
++        if (error) *error = tr("Cannot write CKPool config");
++        return false;
++    }
++    output.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
++    if (!output.commit()) {
++        if (error) *error = tr("Cannot commit CKPool config");
++        return false;
++    }
++    return true;
++}
++
++void MiningCenter::startPool()
++{
++    refreshAll();
++    if (!m_safe) {
++        QMessageBox::warning(this, tr("Mining blocked"), tr("CKPool will not start because the local tip is not confirmed by the public network."));
++        appendLog(tr("CKPool start blocked by chain guard."));
++        return;
++    }
++
++    QString error;
++    if (!repairCKPoolConfig(&error)) {
++        QMessageBox::critical(this, tr("CKPool"), error);
++        appendLog(error);
++        return;
++    }
++
++    if (isPoolRunning()) {
++        appendLog(tr("CKPool is already running."));
++        return;
++    }
++
++    const bool launched = QProcess::startDetached(m_ckpool_path->text(), {
++        QStringLiteral("-c"), m_ckpool_conf->text(), QStringLiteral("-D"), QStringLiteral("-l"), QStringLiteral("6")
++    });
++    if (!launched) {
++        QMessageBox::critical(this, tr("CKPool"), tr("Could not launch CKPool."));
++        appendLog(tr("CKPool launch failed."));
++        return;
++    }
++    m_last_safe_height = m_local_blocks;
++    appendLog(tr("CKPool started at confirmed height %1.").arg(m_local_blocks));
++    QTimer::singleShot(1000, this, &MiningCenter::refreshAll);
++}
++
++void MiningCenter::stopPool()
++{
++    if (isPoolRunning()) {
++        QProcess::execute(QStringLiteral("pkill"), {QStringLiteral("-TERM"), QStringLiteral("-x"), QStringLiteral("ckpool")});
++        appendLog(tr("CKPool stopped."));
++    }
++    QTimer::singleShot(250, this, &MiningCenter::refreshAll);
++}
++
++bool MiningCenter::safeRollbackToPublic(QString* error)
++{
++    if (m_peer_height < 0 || m_peer_agree < 3) {
++        if (error) *error = tr("At least 3 trusted peers must agree before rollback.");
++        return false;
++    }
++    if (m_local_blocks <= m_peer_height) {
++        if (error) error->clear();
++        return true;
++    }
++
++    int api_common_code = 0;
++    QString api_common_hash;
++    if (!fetchApiBlockSync(m_peer_height, api_common_code, api_common_hash) || api_common_code != 200 || api_common_hash.isEmpty()) {
++        if (error) *error = tr("The TWOORE API did not confirm the peer common height %1.").arg(m_peer_height);
++        return false;
++    }
++
++    bool ok = false;
++    QString rpc_error;
++    UniValue params(UniValue::VARR);
++    params.push_back(m_peer_height);
++    const UniValue common_hash_v = rpc("getblockhash", params, &ok, &rpc_error);
++    if (!ok || !common_hash_v.isStr()) {
++        if (error) *error = rpc_error;
++        return false;
++    }
++    const QString common_hash = QString::fromStdString(common_hash_v.get_str());
++    if (api_common_hash != common_hash) {
++        if (error) *error = tr("API/peer common-point hash mismatch. Rollback refused.");
++        return false;
++    }
++
++    int api_tip_code = 0;
++    QString api_tip_hash;
++    fetchApiBlockSync(m_local_blocks, api_tip_code, api_tip_hash);
++    if (api_tip_code == 200 && !api_tip_hash.isEmpty() && api_tip_hash == m_local_hash) {
++        if (error) *error = tr("The current local tip is already public. Rollback refused.");
++        return false;
++    }
++
++    UniValue bad_params(UniValue::VARR);
++    bad_params.push_back(m_peer_height + 1);
++    const UniValue bad_hash_v = rpc("getblockhash", bad_params, &ok, &rpc_error);
++    if (!ok || !bad_hash_v.isStr()) {
++        if (error) *error = rpc_error;
++        return false;
++    }
++    const QString bad_hash = QString::fromStdString(bad_hash_v.get_str());
++    UniValue invalidate(UniValue::VARR);
++    invalidate.push_back(bad_hash.toStdString());
++    rpc("invalidateblock", invalidate, &ok, &rpc_error);
++    if (!ok) {
++        if (error) *error = rpc_error;
++        return false;
++    }
++    appendLog(tr("Safely invalidated local branch from height %1 (%2).").arg(m_peer_height + 1).arg(bad_hash));
++    if (error) error->clear();
++    return true;
++}
++
++void MiningCenter::repairNetwork()
++{
++    stopPool();
++    reconnectTrustedPeers();
++    QTimer::singleShot(1800, this, [this] {
++        updateNodeAndPeers();
++        QString error;
++        if (m_local_blocks > m_peer_height && m_peer_agree >= 3) {
++            if (safeRollbackToPublic(&error)) {
++                QMessageBox::information(this, tr("TWOORE"), tr("The node was returned to the verified public common tip."));
++            } else {
++                QMessageBox::warning(this, tr("TWOORE"), error);
++            }
++        } else {
++            QMessageBox::information(this, tr("TWOORE"), tr("No safe rollback is required. The node will continue synchronizing."));
++        }
++        refreshAll();
++    });
++}
++
++void MiningCenter::onBlockTipChanged(int count)
++{
++    if (!isPoolRunning()) return;
++    if (m_last_safe_height >= 0 && count > m_last_safe_height) {
++        m_pending_mined_height = count;
++        m_pending_since_ms = QDateTime::currentMSecsSinceEpoch();
++        m_pending_peers_refreshed = false;
++        appendLog(tr("New locally mined block detected at height %1. CKPool is being stopped until public propagation is confirmed.").arg(count));
++        stopPool();
++        pauseBitaxes();
++        m_pool_was_auto_stopped = true;
++    }
++}
++
++void MiningCenter::refreshBitaxe1() { refreshBitaxe(m_bitaxe1_ip->text().trimmed(), m_bitaxe1_state, 1); }
++void MiningCenter::refreshBitaxe2() { refreshBitaxe(m_bitaxe2_ip->text().trimmed(), m_bitaxe2_state, 2); }
++
++void MiningCenter::refreshBitaxe(const QString& ip, QLabel* label, int slot)
++{
++    if (ip.isEmpty()) {
++        setStateLabel(label, tr("Enter an IP address"), WARN);
++        return;
++    }
++    QNetworkRequest req(QUrl(QStringLiteral("http://%1/api/system/info").arg(ip)));
++    QNetworkReply* reply = m_network->get(req);
++    QTimer::singleShot(3500, reply, [reply] { if (!reply->isFinished()) reply->abort(); });
++    connect(reply, &QNetworkReply::finished, this, [this, reply, label, slot] {
++        const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
++        if (status != 200) {
++            setStateLabel(label, tr("OFFLINE / HTTP %1").arg(status), BAD);
++            reply->deleteLater();
++            return;
++        }
++        const QJsonDocument doc = QJsonDocument::fromJson(reply->readAll());
++        const QJsonObject o = doc.object();
++        const QString host = o.value(QStringLiteral("hostname")).toString(tr("Bitaxe %1").arg(slot));
++        const double hr = o.value(QStringLiteral("hashRate")).toDouble();
++        const double temp = o.value(QStringLiteral("temp")).toDouble();
++        const double power = o.value(QStringLiteral("power")).toDouble();
++        const int shares = o.value(QStringLiteral("sharesAccepted")).toInt();
++        const QString best = o.value(QStringLiteral("bestDiff")).toVariant().toString();
++        const QString pool = o.value(QStringLiteral("stratumURL")).toString();
++        setStateLabel(label,
++            tr("%1 · %2 GH/s · %3°C · %4 W · shares %5 · best %6 · %7")
++                .arg(host).arg(hr, 0, 'f', 1).arg(temp, 0, 'f', 1).arg(power, 0, 'f', 1).arg(shares).arg(best).arg(pool),
++            GOOD);
++        reply->deleteLater();
++    });
++}
++
++void MiningCenter::configureBitaxe1() { configureBitaxe(m_bitaxe1_ip->text().trimmed(), QStringLiteral("bitaxe1"), m_bitaxe1_state); }
++void MiningCenter::configureBitaxe2() { configureBitaxe(m_bitaxe2_ip->text().trimmed(), QStringLiteral("bitaxe2"), m_bitaxe2_state); }
++
++void MiningCenter::configureBitaxe(const QString& ip, const QString& worker, QLabel* label)
++{
++    if (ip.isEmpty() || m_stratum_host->text().trimmed().isEmpty()) {
++        QMessageBox::warning(this, tr("Bitaxe"), tr("Enter the Bitaxe IP and the Stratum host visible from your LAN."));
++        return;
++    }
++    if (!m_safe) {
++        QMessageBox::warning(this, tr("Bitaxe"), tr("The node is not on a confirmed public tip. Configuration is allowed, but mining will remain blocked until the network is safe."));
++    }
++
++    QJsonObject settings;
++    settings.insert(QStringLiteral("stratumURL"), QStringLiteral("stratum+tcp://") + m_stratum_host->text().trimmed());
++    settings.insert(QStringLiteral("stratumPort"), 3333);
++    settings.insert(QStringLiteral("stratumUser"), worker);
++    settings.insert(QStringLiteral("stratumPassword"), QStringLiteral("x"));
++    settings.insert(QStringLiteral("stratumProtocol"), QStringLiteral("SV1"));
++    settings.insert(QStringLiteral("stratumSuggestedDifficulty"), 1.0);
++    settings.insert(QStringLiteral("stratumTLS"), 0);
++
++    QNetworkRequest req(QUrl(QStringLiteral("http://%1/api/system").arg(ip)));
++    req.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
++    QNetworkReply* reply = m_network->sendCustomRequest(req, QByteArrayLiteral("PATCH"), QJsonDocument(settings).toJson(QJsonDocument::Compact));
++    QTimer::singleShot(4000, reply, [reply] { if (!reply->isFinished()) reply->abort(); });
++    connect(reply, &QNetworkReply::finished, this, [this, reply, label, worker, ip] {
++        const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
++        if (status == 200) {
++            setStateLabel(label, tr("LINKED: %1 → %2:3333").arg(worker).arg(m_stratum_host->text().trimmed()), GOOD);
++            appendLog(tr("%1 (%2) linked to TWOORE Stratum.").arg(worker).arg(ip));
++        } else {
++            setStateLabel(label, tr("Configuration failed (HTTP %1)").arg(status), BAD);
++            appendLog(tr("Bitaxe configuration failed for %1 (HTTP %2).").arg(ip).arg(status));
++        }
++        reply->deleteLater();
++    });
++}
++
++void MiningCenter::bitaxePost(const QString& ip, const QString& path, QLabel* label, const QString& action_name)
++{
++    if (ip.trimmed().isEmpty()) return;
++    QNetworkRequest req(QUrl(QStringLiteral("http://%1%2").arg(ip.trimmed()).arg(path)));
++    QNetworkReply* reply = m_network->post(req, QByteArray());
++    QTimer::singleShot(3000, reply, [reply] { if (!reply->isFinished()) reply->abort(); });
++    connect(reply, &QNetworkReply::finished, this, [this, reply, label, action_name, ip] {
++        const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
++        if (status == 200) {
++            setStateLabel(label, action_name, GOOD);
++            appendLog(tr("Bitaxe %1: %2").arg(ip).arg(action_name));
++        }
++        reply->deleteLater();
++    });
++}
++
++void MiningCenter::pauseBitaxes()
++{
++    bitaxePost(m_bitaxe1_ip->text(), QStringLiteral("/api/system/pause"), m_bitaxe1_state, tr("PAUSED"));
++    bitaxePost(m_bitaxe2_ip->text(), QStringLiteral("/api/system/pause"), m_bitaxe2_state, tr("PAUSED"));
++}
++
++void MiningCenter::resumeBitaxes()
++{
++    if (!m_safe || !isPoolRunning()) {
++        QMessageBox::warning(this, tr("Bitaxe"), tr("Resume is blocked until the public chain is confirmed and CKPool is running."));
++        return;
++    }
++    bitaxePost(m_bitaxe1_ip->text(), QStringLiteral("/api/system/resume"), m_bitaxe1_state, tr("MINING"));
++    bitaxePost(m_bitaxe2_ip->text(), QStringLiteral("/api/system/resume"), m_bitaxe2_state, tr("MINING"));
++}
++
++void MiningCenter::appendLog(const QString& text)
++{
++    if (!m_log) return;
++    m_log->append(QStringLiteral("[%1] %2").arg(QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss")), text));
++}
++
++void MiningCenter::setStateLabel(QLabel* label, const QString& text, const QString& color)
++{
++    if (!label) return;
++    label->setText(text);
++    label->setStyleSheet(QStringLiteral("QLabel { color: %1; font-weight: 600; }").arg(color));
++}
++
++bool MiningCenter::runningInWSL() const
++{
++    if (qEnvironmentVariableIsSet("WSL_DISTRO_NAME")) return true;
++    QFile f(QStringLiteral("/proc/version"));
++    if (f.open(QIODevice::ReadOnly)) {
++        return QString::fromUtf8(f.readAll()).contains(QStringLiteral("microsoft"), Qt::CaseInsensitive);
++    }
++    return false;
++}
++
++QString MiningCenter::wslIp() const
++{
++    QProcess p;
++    p.start(QStringLiteral("hostname"), {QStringLiteral("-I")});
++    if (!p.waitForFinished(1500)) return {};
++    const QStringList ips = QString::fromUtf8(p.readAllStandardOutput()).simplified().split(' ', Qt::SkipEmptyParts);
++    for (const QString& ip : ips) {
++        QHostAddress addr(ip);
++        if (addr.protocol() == QAbstractSocket::IPv4Protocol && !addr.isLoopback()) return ip;
++    }
++    return {};
++}
++
++QString MiningCenter::defaultStratumHost() const
++{
++    // In WSL, the Bitaxe must normally connect to the Windows LAN address,
++    // not the private WSL 172.x address. Ask Windows for the best physical IPv4.
++    if (runningInWSL()) {
++        QProcess ps;
++        const QString command = QStringLiteral(
++            "(Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254*' -and $_.InterfaceAlias -notmatch 'vEthernet|WSL|Loopback|Bluetooth' } | Sort-Object InterfaceMetric | Select-Object -First 1 -ExpandProperty IPAddress)");
++        ps.start(QStringLiteral("powershell.exe"), {QStringLiteral("-NoProfile"), QStringLiteral("-Command"), command});
++        if (ps.waitForFinished(2500)) {
++            const QString ip = QString::fromUtf8(ps.readAllStandardOutput()).trimmed();
++            QHostAddress addr(ip);
++            if (addr.protocol() == QAbstractSocket::IPv4Protocol) return ip;
++        }
++    }
++
++    QString fallback;
++    const auto addresses = QNetworkInterface::allAddresses();
++    for (const QHostAddress& addr : addresses) {
++        if (addr.protocol() != QAbstractSocket::IPv4Protocol || addr.isLoopback()) continue;
++        const QString s = addr.toString();
++        if (fallback.isEmpty()) fallback = s;
++        if (s.startsWith(QStringLiteral("192.168.")) || s.startsWith(QStringLiteral("10."))) return s;
++    }
++    return fallback;
++}
++
++void MiningCenter::configureWindowsBridge()
++{
++    if (!runningInWSL()) {
++        QMessageBox::information(this, tr("TWOORE"), tr("The Windows bridge is only needed when the application is running inside WSL."));
++        return;
++    }
++    const QString linux_ip = wslIp();
++    if (linux_ip.isEmpty()) {
++        QMessageBox::critical(this, tr("TWOORE"), tr("Could not determine the WSL IPv4 address."));
++        return;
++    }
++    const QString lan_ip = m_stratum_host->text().trimmed();
++    if (lan_ip.isEmpty()) {
++        QMessageBox::warning(this, tr("TWOORE"), tr("Set the Windows LAN address visible to the Bitaxe first."));
++        return;
++    }
++
++    const QString script = QStringLiteral(
++        "$ErrorActionPreference='Stop'; "
++        "netsh interface portproxy delete v4tov4 listenport=3333 listenaddress=0.0.0.0 2>$null; "
++        "netsh interface portproxy add v4tov4 listenport=3333 listenaddress=0.0.0.0 connectport=3333 connectaddress=%1; "
++        "netsh advfirewall firewall delete rule name='TWOORE CKPool 3333' 2>$null; "
++        "netsh advfirewall firewall add rule name='TWOORE CKPool 3333' dir=in action=allow protocol=TCP localport=3333; "
++        "Write-Host 'TWOORE bridge ready: %2:3333 -> %1:3333';")
++        .arg(linux_ip, lan_ip);
++
++    const QByteArray utf16(reinterpret_cast<const char*>(script.utf16()), script.size() * 2);
++    const QString encoded = QString::fromLatin1(utf16.toBase64());
++    const QString elevate = QStringLiteral(
++        "Start-Process powershell.exe -Verb RunAs -Wait -ArgumentList '-NoProfile','-EncodedCommand','%1'").arg(encoded);
++
++    appendLog(tr("Requesting Windows administrator permission to map %1:3333 to WSL %2:3333...").arg(lan_ip, linux_ip));
++    QProcess ps;
++    ps.start(QStringLiteral("powershell.exe"), {QStringLiteral("-NoProfile"), QStringLiteral("-Command"), elevate});
++    if (!ps.waitForFinished(60000) || ps.exitCode() != 0) {
++        QMessageBox::warning(this, tr("TWOORE"), tr("Windows bridge setup did not complete. Approve the UAC prompt and try again."));
++        appendLog(tr("Windows portproxy setup failed or was cancelled."));
++        return;
++    }
++    QMessageBox::information(this, tr("TWOORE"), tr("Windows port 3333 is now forwarded to CKPool in WSL. Configure the Bitaxe to %1:3333.").arg(lan_ip));
++    appendLog(tr("Windows bridge ready: %1:3333 -> %2:3333").arg(lan_ip, linux_ip));
++}
+diff -ruN twoore-pristine/twoore-chain-main/src/qt/miningcenter.h twoore-final/twoore-chain-main/src/qt/miningcenter.h
+--- twoore-pristine/twoore-chain-main/src/qt/miningcenter.h	1970-01-01 00:00:00.000000000 +0000
++++ twoore-final/twoore-chain-main/src/qt/miningcenter.h	2026-10-04 21:32:44.782492690 +0000
+@@ -0,0 +1,141 @@
++// Copyright (c) 2026 TWOORE contributors
++// Distributed under the MIT software license.
++
++#ifndef BITCOIN_QT_MININGCENTER_H
++#define BITCOIN_QT_MININGCENTER_H
++
++#include <QDialog>
++#include <QString>
++
++#include <univalue.h>
++
++#include <array>
++
++class ClientModel;
++class QCheckBox;
++class QLineEdit;
++class QLabel;
++class QNetworkAccessManager;
++class QPushButton;
++class QTableWidget;
++class QTextEdit;
++class QTimer;
++
++namespace interfaces {
++class Node;
++}
++
++/**
++ * TWOORE Mining Center.
++ *
++ * This dialog intentionally acts as a safety gate between the node and CKPool.
++ * It never starts CKPool unless the local block tip, header tip and trusted
++ * network view agree. Bitaxe devices can be monitored and pointed at the local
++ * Stratum endpoint from this window.
++ */
++class MiningCenter : public QDialog
++{
++    Q_OBJECT
++
++public:
++    explicit MiningCenter(interfaces::Node& node, QWidget* parent = nullptr);
++    ~MiningCenter() override;
++
++    void setClientModel(ClientModel* model);
++
++private Q_SLOTS:
++    void refreshAll();
++    void reconnectTrustedPeers();
++    void startPool();
++    void stopPool();
++    void repairNetwork();
++    void refreshBitaxe1();
++    void refreshBitaxe2();
++    void configureBitaxe1();
++    void configureBitaxe2();
++    void pauseBitaxes();
++    void resumeBitaxes();
++    void configureWindowsBridge();
++    void onBlockTipChanged(int count);
++
++private:
++    interfaces::Node& m_node;
++    ClientModel* m_client_model{nullptr};
++    QNetworkAccessManager* m_network{nullptr};
++    QTimer* m_refresh_timer{nullptr};
++
++    QLabel* m_node_state{nullptr};
++    QLabel* m_blocks{nullptr};
++    QLabel* m_headers{nullptr};
++    QLabel* m_best_hash{nullptr};
++    QLabel* m_ibd{nullptr};
++    QLabel* m_connections{nullptr};
++    QLabel* m_peer_consensus{nullptr};
++    QLabel* m_api_state{nullptr};
++    QLabel* m_safety_state{nullptr};
++    QLabel* m_pool_state{nullptr};
++    QLabel* m_stratum_state{nullptr};
++
++    QLineEdit* m_ckpool_path{nullptr};
++    QLineEdit* m_ckpool_conf{nullptr};
++    QLineEdit* m_stratum_host{nullptr};
++    QLineEdit* m_bitaxe1_ip{nullptr};
++    QLineEdit* m_bitaxe2_ip{nullptr};
++    QLabel* m_bitaxe1_state{nullptr};
++    QLabel* m_bitaxe2_state{nullptr};
++    QCheckBox* m_auto_heal{nullptr};
++    QCheckBox* m_auto_resume_pool{nullptr};
++    QTextEdit* m_log{nullptr};
++
++    QPushButton* m_start_pool_button{nullptr};
++
++    int m_local_blocks{-1};
++    int m_local_headers{-1};
++    int m_peer_height{-1};
++    int m_peer_agree{0};
++    int m_trusted_connected{0};
++    int m_last_safe_height{-1};
++    int m_pending_mined_height{-1};
++    qint64 m_pending_since_ms{0};
++    bool m_pending_peers_refreshed{false};
++    QString m_local_hash;
++    QString m_api_hash;
++    int m_api_code{0};
++    bool m_ibd_state{true};
++    bool m_safe{false};
++    bool m_refreshing_api{false};
++    bool m_pool_was_auto_stopped{false};
++    qint64 m_last_auto_heal_attempt{0};
++
++    const std::array<QString, 4> m_trusted_peers{{
++        QStringLiteral("108.61.128.66:8222"),
++        QStringLiteral("139.84.233.10:8222"),
++        QStringLiteral("64.176.235.222:8222"),
++        QStringLiteral("192.248.165.108:8222"),
++    }};
++
++    UniValue rpc(const std::string& command, const UniValue& params, bool* ok = nullptr, QString* error = nullptr);
++    void updateNodeAndPeers();
++    void updateSafety();
++    void updateApiAsync();
++    bool fetchApiBlockSync(int height, int& status_code, QString& hash);
++    QString extractHash(const QJsonValue& value) const;
++
++    bool isPoolRunning() const;
++    bool stratumPortOpen() const;
++    bool repairCKPoolConfig(QString* error = nullptr);
++    bool safeRollbackToPublic(QString* error = nullptr);
++    QString readConfigValue(const QString& key) const;
++
++    void refreshBitaxe(const QString& ip, QLabel* label, int slot);
++    void configureBitaxe(const QString& ip, const QString& worker, QLabel* label);
++    void bitaxePost(const QString& ip, const QString& path, QLabel* label, const QString& action_name);
++
++    void appendLog(const QString& text);
++    void setStateLabel(QLabel* label, const QString& text, const QString& color);
++    QString defaultStratumHost() const;
++    bool runningInWSL() const;
++    QString wslIp() const;
++};
++
++#endif // BITCOIN_QT_MININGCENTER_H
