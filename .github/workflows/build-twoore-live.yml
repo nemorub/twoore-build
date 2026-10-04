@@ -1,0 +1,112 @@
+name: Build TWOORE Live-Compatible
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout workflow repository
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            libtool \
+            autotools-dev \
+            automake \
+            pkg-config \
+            libssl-dev \
+            libevent-dev \
+            bsdextrautils \
+            libboost-all-dev \
+            libsqlite3-dev \
+            libzmq3-dev \
+            libsodium-dev \
+            python3 \
+            git \
+            ccache
+
+      - name: Clone TWOORE v0.1.14
+        run: |
+          git clone \
+            --depth 1 \
+            --branch v0.1.14 \
+            https://github.com/twoore/twoore-chain.git \
+            twoore-src
+
+      - name: Patch live-chain difficulty from height 10003
+        working-directory: twoore-src
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("src/pow.cpp")
+          s = p.read_text()
+
+          old = """    unsigned int nProofOfWorkLimit = UintToArith256(params.powLimit).GetCompact();
+          """
+
+          new = """    unsigned int nProofOfWorkLimit = UintToArith256(params.powLimit).GetCompact();
+
+              // TWOORE live-chain compatibility from height 10003.
+              if (pindexLast->nHeight + 1 >= 10003) {
+                  return nProofOfWorkLimit;
+              }
+          """
+
+          if old not in s:
+              raise SystemExit("Patch point not found in src/pow.cpp")
+
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+
+          print("Patch applied:")
+          for line in p.read_text().splitlines():
+              if "live-chain compatibility" in line or "pindexLast->nHeight + 1 >= 10003" in line:
+                  print(line)
+          PY
+
+          git diff -- src/pow.cpp
+
+      - name: Configure
+        working-directory: twoore-src
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+        run: |
+          ./autogen.sh
+          ./configure \
+            --disable-gui \
+            --disable-tests \
+            --disable-bench \
+            --without-bdb \
+            CC="ccache gcc" \
+            CXX="ccache g++"
+
+      - name: Build daemon and CLI only
+        working-directory: twoore-src
+        run: |
+          make -C src -j2 twoored twoore-cli
+
+      - name: Verify binaries
+        working-directory: twoore-src
+        run: |
+          ./src/twoored -version | head -n 5
+          ./src/twoore-cli -version | head -n 5
+          sha256sum src/twoored src/twoore-cli | tee SHA256SUMS.txt
+          ls -lh src/twoored src/twoore-cli SHA256SUMS.txt
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: twoore-live-compatible-linux-x86_64
+          path: |
+            twoore-src/src/twoored
+            twoore-src/src/twoore-cli
+            twoore-src/SHA256SUMS.txt
+          retention-days: 7
